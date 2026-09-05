@@ -60,7 +60,11 @@ def run_loop():
     scrapers = get_scrapers()
 
     while True:
+        # Print check start locally to Pi logs (silent on Telegram)
         print("\n🔍 Running hourly check...")
+        
+        # Optional: Send silent Telegram ping that check started
+        send_telegram_message("🔍 Running hourly check...", disable_notification=True)
         total_new_jobs = 0
         
         for scraper in scrapers:
