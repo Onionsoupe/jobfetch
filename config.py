@@ -1,4 +1,4 @@
-from scraper import OpenRoboticsScraper, WorkdayJobScraper, GreenhouseScraper, SoftgardenScraper
+from scraper import OpenRoboticsScraper, WorkdayJobScraper, GreenhouseScraper, SoftgardenScraper, AshbyScraper
 
 def get_scrapers():
     """Returns all active scraper targets."""
@@ -16,5 +16,6 @@ def get_scrapers():
         SoftgardenScraper(
             tenant_domain="neura-mobile-robots",
             company_name="NEURA Mobile Robots"
-        )
+        ),
+        AshbyScraper(organization_slug="sensmore")
     ]

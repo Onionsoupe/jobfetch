@@ -433,3 +433,91 @@ class SoftgardenScraper(BaseJobScraper):
 
         return new_jobs
 
+class AshbyScraper(BaseJobScraper):
+    """Scraper for companies using Ashby ATS (e.g., Sensmore)."""
+
+    def __init__(self, organization_slug: str = "sensmore", db_filename: str = None):
+        self.organization_slug = organization_slug
+        self.source_name = f"Ashby ({organization_slug.title()})"
+        # Direct public GET URL endpoint
+        self.api_url = f"https://api.ashbyhq.com/posting-api/job-board/{self.organization_slug}"
+        self.db_filename = db_filename or f"seen_ashby_{organization_slug}_jobs.json"
+        
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json"
+        }
+        
+        self.seen_jobs = self._load_seen_jobs()
+
+    def _load_seen_jobs(self) -> dict:
+        if not os.path.exists(self.db_filename):
+            with open(self.db_filename, "w", encoding="utf-8") as f:
+                json.dump({}, f)
+            return {}
+        try:
+            with open(self.db_filename, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return {link: datetime.fromisoformat(ts) for link, ts in data.items()}
+        except Exception:
+            return {}
+
+    def _save_seen_jobs(self):
+        try:
+            data = {link: dt.isoformat() for link, dt in self.seen_jobs.items()}
+            with open(self.db_filename, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"Error saving {self.db_filename}: {e}")
+
+    def fetch_jobs(self) -> list[dict]:
+        now = datetime.now(timezone.utc)
+        new_jobs = []
+
+        try:
+            # Use GET request directly on the public URL
+            response = requests.get(
+                self.api_url, 
+                headers=self.headers, 
+                timeout=10
+            )
+
+            if response.status_code != 200:
+                print(f"[{self.source_name}] API Request failed ({response.status_code})")
+                return []
+
+            data = response.json()
+            jobs = data.get("jobs", [])
+
+            for job in jobs:
+                job_id = job.get("id")
+                title = job.get("title")
+                
+                # Full public application link
+                link = job.get("jobUrl") or f"https://jobs.ashbyhq.com/{self.organization_slug}/{job_id}"
+                
+                department = job.get("department", "Unspecified")
+                location = job.get("location", "Remote/Unspecified")
+                employment_type = job.get("employmentType", "Full Time")
+
+                if link in self.seen_jobs:
+                    continue
+
+                self.seen_jobs[link] = now
+
+                new_jobs.append({
+                    "id": link,
+                    "title": title,
+                    "link": link,
+                    "source": self.source_name,
+                    "activity": "Active Posting",
+                    "summary": f"Dept: {department} | Location: {location} | Type: {employment_type}"
+                })
+
+        except Exception as e:
+            print(f"[{self.source_name}] Error fetching jobs: {e}")
+
+        if new_jobs:
+            self._save_seen_jobs()
+
+        return new_jobs
