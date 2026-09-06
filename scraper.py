@@ -312,8 +312,9 @@ class GreenhouseScraper(BaseJobScraper):
         return new_jobs
 
 class SoftgardenHTMLParser(HTMLParser):
-    def __init__(self):
+    def __init__(self, fallback_career_url: str):
         super().__init__()
+        self.fallback_career_url = fallback_career_url
         self.in_a_tag = False
         self.current_href = ""
         self.current_text = ""
@@ -323,7 +324,6 @@ class SoftgardenHTMLParser(HTMLParser):
         if tag == "a":
             attrs_dict = dict(attrs)
             href = attrs_dict.get("href", "")
-            # Filter specifically for individual job posting detail links
             if "/job/" in href:
                 self.in_a_tag = True
                 self.current_href = href
@@ -336,10 +336,16 @@ class SoftgardenHTMLParser(HTMLParser):
     def handle_endtag(self, tag):
         if tag == "a" and self.in_a_tag:
             title = self.current_text.strip()
-            if title and self.current_href:
+            if title:
+                # If href exists, use full link; otherwise fall back to career page
+                if self.current_href:
+                    full_link = self.current_href if self.current_href.startswith("http") else urljoin(self.fallback_career_url, self.current_href)
+                else:
+                    full_link = self.fallback_career_url
+                
                 self.jobs.append({
                     "title": title,
-                    "link": self.current_href
+                    "link": full_link
                 })
             self.in_a_tag = False
             self.current_href = ""
@@ -352,7 +358,9 @@ class SoftgardenScraper(BaseJobScraper):
         self.tenant_domain = tenant_domain
         self.company_name = company_name
         self.source_name = f"Softgarden ({company_name})"
-        self.board_url = f"https://{self.tenant_domain}.softgarden.io/"
+        
+        # Main company career page URL to fall back on
+        self.career_page_url = f"https://{self.tenant_domain}.softgarden.io/"
         self.db_filename = db_filename or f"seen_softgarden_{self.tenant_domain}_jobs.json"
         
         self.headers = {
@@ -395,34 +403,33 @@ class SoftgardenScraper(BaseJobScraper):
         new_jobs = []
 
         try:
-            response = requests.get(self.board_url, headers=self.headers, timeout=10)
+            response = requests.get(self.career_page_url, headers=self.headers, timeout=10)
             if response.status_code != 200:
                 print(f"[{self.source_name}] HTML fetch failed (Status {response.status_code})")
                 return []
 
-            parser = SoftgardenHTMLParser()
+            parser = SoftgardenHTMLParser(fallback_career_url=self.career_page_url)
             parser.feed(response.text)
 
             for job in parser.jobs:
-                full_link = job["link"]
-                # Resolve relative links if necessary
-                if full_link.startswith("/"):
-                    full_link = f"https://{self.tenant_domain}.softgarden.io{full_link}"
-
                 title = job["title"]
+                full_link = job["link"]
 
-                if not full_link or full_link in self.seen_jobs:
+                # Deduplicate by Title + URL combo
+                unique_key = f"{title}_{full_link}"
+
+                if unique_key in self.seen_jobs:
                     continue
 
-                self.seen_jobs[full_link] = now
+                self.seen_jobs[unique_key] = now
 
                 new_jobs.append({
-                    "id": full_link,
+                    "id": unique_key,
                     "title": title,
-                    "link": full_link,
+                    "link": self.career_page_url, # Always points safely to main career page
                     "source": self.source_name,
                     "activity": "Active Posting",
-                    "summary": f"Job Posting: {title}"
+                    "summary": f"<b>{title}</b>\n<a href=\"{self.career_page_url}\">View on {self.company_name} Career Portal</a>"
                 })
 
         except Exception as e:
