@@ -4,6 +4,9 @@ import requests
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
 from dateutil import parser as date_parser
+from html.parser import HTMLParser
+from urllib.parse import urljoin
+from bs4 import BeautifulSoup
 
 
 class BaseJobScraper(ABC):
@@ -307,3 +310,126 @@ class GreenhouseScraper(BaseJobScraper):
             self._save_seen_jobs()
 
         return new_jobs
+
+class SoftgardenHTMLParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.in_a_tag = False
+        self.current_href = ""
+        self.current_text = ""
+        self.jobs = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            attrs_dict = dict(attrs)
+            href = attrs_dict.get("href", "")
+            # Filter specifically for individual job posting detail links
+            if "/job/" in href:
+                self.in_a_tag = True
+                self.current_href = href
+                self.current_text = ""
+
+    def handle_data(self, data):
+        if self.in_a_tag:
+            self.current_text += data
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self.in_a_tag:
+            title = self.current_text.strip()
+            if title and self.current_href:
+                self.jobs.append({
+                    "title": title,
+                    "link": self.current_href
+                })
+            self.in_a_tag = False
+            self.current_href = ""
+            self.current_text = ""
+
+
+class SoftgardenScraper(BaseJobScraper):
+    """Scraper for companies using Softgarden ATS via HTML Board Parsing."""
+    def __init__(self, tenant_domain: str = "neura-mobile-robots", company_name: str = "NEURA Mobile Robots", db_filename: str = None):
+        self.tenant_domain = tenant_domain
+        self.company_name = company_name
+        self.source_name = f"Softgarden ({company_name})"
+        self.board_url = f"https://{self.tenant_domain}.softgarden.io/"
+        self.db_filename = db_filename or f"seen_softgarden_{self.tenant_domain}_jobs.json"
+        
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        }
+        
+        self.seen_jobs = self._load_seen_jobs()
+
+    def _load_seen_jobs(self) -> dict:
+        if not os.path.exists(self.db_filename):
+            return {}
+        try:
+            with open(self.db_filename, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return {link: datetime.fromisoformat(ts) for link, ts in data.items()}
+        except Exception:
+            return {}
+
+    def _save_seen_jobs(self):
+        try:
+            data = {link: dt.isoformat() for link, dt in self.seen_jobs.items()}
+            with open(self.db_filename, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"Error saving {self.db_filename}: {e}")
+
+    def _cleanup_old_buffer(self, max_age_hours: int = 168):
+        now = datetime.now(timezone.utc)
+        cutoff_time = now - timedelta(hours=max_age_hours)
+        self.seen_jobs = {
+            link: seen_time
+            for link, seen_time in self.seen_jobs.items()
+            if seen_time > cutoff_time
+        }
+
+    def fetch_jobs(self) -> list[dict]:
+        now = datetime.now(timezone.utc)
+        self._cleanup_old_buffer(max_age_hours=168)
+        new_jobs = []
+
+        try:
+            response = requests.get(self.board_url, headers=self.headers, timeout=10)
+            if response.status_code != 200:
+                print(f"[{self.source_name}] HTML fetch failed (Status {response.status_code})")
+                return []
+
+            parser = SoftgardenHTMLParser()
+            parser.feed(response.text)
+
+            for job in parser.jobs:
+                full_link = job["link"]
+                # Resolve relative links if necessary
+                if full_link.startswith("/"):
+                    full_link = f"https://{self.tenant_domain}.softgarden.io{full_link}"
+
+                title = job["title"]
+
+                if not full_link or full_link in self.seen_jobs:
+                    continue
+
+                self.seen_jobs[full_link] = now
+
+                new_jobs.append({
+                    "id": full_link,
+                    "title": title,
+                    "link": full_link,
+                    "source": self.source_name,
+                    "activity": "Active Posting",
+                    "summary": f"Job Posting: {title}"
+                })
+
+        except Exception as e:
+            print(f"[{self.source_name}] Error fetching Softgarden board: {e}")
+
+        if new_jobs:
+            self._save_seen_jobs()
+
+        return new_jobs
+
