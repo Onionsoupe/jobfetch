@@ -7,6 +7,8 @@ from dateutil import parser as date_parser
 from html.parser import HTMLParser
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
+import xml.etree.ElementTree as ET
+from typing import Optional
 
 
 class BaseJobScraper(ABC):
@@ -227,12 +229,22 @@ class WorkdayJobScraper(BaseJobScraper):
         return new_jobs
 
 class GreenhouseScraper(BaseJobScraper):
-    """Scraper for companies hosting job boards on Greenhouse API."""
-    def __init__(self, board_token: str = "arxroboticsgmbh", company_name: str = "ARX Robotics", db_filename: str = None):
+    """Scraper for companies hosting job boards on Greenhouse API (US & EU)."""
+    
+    def __init__(
+        self, 
+        board_token: str = "arxroboticsgmbh", 
+        company_name: str = "ARX Robotics", 
+        domain: str = "boards-api.greenhouse.io", 
+        db_filename: Optional[str] = None
+    ):
         self.board_token = board_token
         self.company_name = company_name
+        self.domain = domain
         self.source_name = f"Greenhouse ({company_name})"
-        self.api_url = f"https://boards-api.greenhouse.io/v1/boards/{self.board_token}/jobs?content=true"
+        
+        # Dynamically uses either boards-api.greenhouse.io or boards-api.eu.greenhouse.io
+        self.api_url = f"https://{self.domain}/v1/boards/{self.board_token}/jobs?content=true"
         self.db_filename = db_filename or f"seen_greenhouse_{self.board_token}_jobs.json"
         
         self.headers = {
@@ -285,9 +297,9 @@ class GreenhouseScraper(BaseJobScraper):
 
             for job in job_postings:
                 full_link = job.get("absolute_url")
-                title = job.get("title", "Untitled Role")
+                title = job.get("title", "Untitled Role").strip()
                 location_info = job.get("location", {})
-                location_name = location_info.get("name", "Unspecified Location")
+                location_name = location_info.get("name", "Unspecified Location").strip()
 
                 if not full_link or full_link in self.seen_jobs:
                     continue
@@ -528,3 +540,95 @@ class AshbyScraper(BaseJobScraper):
             self._save_seen_jobs()
 
         return new_jobs
+
+class PersonioScraper(BaseJobScraper):
+    """Scraper for companies using Personio ATS via their public XML feed."""
+    
+    def __init__(self, tenant_slug: str, company_name: str, domain: str = "jobs.personio.de", db_filename: str = None):
+        self.tenant_slug = tenant_slug
+        self.company_name = company_name
+        self.domain = domain
+        self.source_name = f"Personio ({company_name})"
+        
+        self.xml_url = f"https://{self.tenant_slug}.{self.domain}/xml"
+        self.base_job_url = f"https://{self.tenant_slug}.{self.domain}/job"
+        
+        self.db_filename = db_filename or f"seen_personio_{self.tenant_slug}_jobs.json"
+        
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/xml, text/xml, */*"
+        }
+        
+        self.seen_jobs = self._load_seen_jobs()
+
+    def _load_seen_jobs(self) -> dict:
+        if not os.path.exists(self.db_filename):
+            return {}
+        try:
+            with open(self.db_filename, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return {link: datetime.fromisoformat(ts) for link, ts in data.items()}
+        except Exception:
+            return {}
+
+    def _save_seen_jobs(self):
+        try:
+            data = {link: dt.isoformat() for link, dt in self.seen_jobs.items()}
+            with open(self.db_filename, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"Error saving {self.db_filename}: {e}")
+
+    def _cleanup_old_buffer(self, max_age_hours: int = 168):
+        now = datetime.now(timezone.utc)
+        cutoff_time = now - timedelta(hours=max_age_hours)
+        self.seen_jobs = {
+            link: seen_time
+            for link, seen_time in self.seen_jobs.items()
+            if seen_time > cutoff_time
+        }
+
+    def fetch_jobs(self) -> list[dict]:
+        now = datetime.now(timezone.utc)
+        self._cleanup_old_buffer(max_age_hours=168)
+        new_jobs = []
+
+        try:
+            response = requests.get(self.xml_url, headers=self.headers, timeout=10)
+            if response.status_code != 200:
+                print(f"[{self.source_name}] API call failed with status: {response.status_code}")
+                return []
+
+            root = ET.fromstring(response.content)
+            
+            for position in root.findall(".//position"):
+                job_id = position.findtext("id")
+                title = position.findtext("name", "Untitled Role").strip()
+                department = position.findtext("office", "General").strip()
+                employment_type = position.findtext("employmentType", "Full-time").strip()
+                
+                full_link = f"{self.base_job_url}/{job_id}?language=en"
+
+                if not job_id or full_link in self.seen_jobs:
+                    continue
+
+                self.seen_jobs[full_link] = now
+
+                new_jobs.append({
+                    "id": full_link,
+                    "title": title,
+                    "link": full_link,
+                    "source": self.source_name,
+                    "activity": "Active Posting",
+                    "summary": f"Dept: {department} | Type: {employment_type}"
+                })
+
+        except Exception as e:
+            print(f"[{self.source_name}] Error fetching Personio jobs: {e}")
+
+        if new_jobs:
+            self._save_seen_jobs()
+
+        return new_jobs
+

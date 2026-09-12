@@ -64,7 +64,7 @@ def run_loop():
         print("\n🔍 Running hourly check...")
         
         # Optional: Send silent Telegram ping that check started
-        send_telegram_message("🔍 Running hourly check...", disable_notification=True)
+        #send_telegram_message("🔍 Running hourly check...", disable_notification=True)
         total_new_jobs = 0
         
         for scraper in scrapers:
@@ -92,7 +92,7 @@ def run_loop():
         else:
             no_jobs_msg = "ℹ️ <b>Scan Complete:</b> No new jobs found this cycle."
             print("No new jobs found across any sources this cycle.")
-            send_telegram_message(no_jobs_msg, disable_notification=True)
+            #send_telegram_message(no_jobs_msg, disable_notification=True)
 
         time.sleep(3600)
 
