@@ -78,7 +78,7 @@ def run_loop():
                     print(f"🔗 {job['link']}")
                     print(f"📍 {job['summary']}")
                     
-                    send_telegram_notification(job)
+                    #send_telegram_notification(job)
                     print()
                     
             except Exception as e:

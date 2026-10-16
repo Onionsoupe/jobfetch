@@ -4,7 +4,8 @@ from scraper import (
     GreenhouseScraper,
     SoftgardenScraper,
     AshbyScraper,
-    PersonioScraper
+    PersonioScraper,
+    JoinScraper,
 )
 
 # Personio targets
@@ -24,6 +25,21 @@ PERSONIO_TARGETS = [
         "company_name": "Autonomous Teaming Solutions",
         "domain": "jobs.personio.de"
     },
+    {
+        "tenant_slug": "franka-robotics",
+        "company_name": "Franka Robotics",
+        "domain": "jobs.personio.com"
+    },
+    {
+        "tenant_slug": "magazino",
+        "company_name": "Magazino GmbH",
+        "domain": "jobs.personio.de"
+    },
+    {
+        "tenant_slug": "robotise",  
+        "company_name": "Robotise AG",
+        "domain": "jobs.personio.de",
+    },
 ]
 
 # Greenhouse targets (Supports both standard US and EU domains)
@@ -37,6 +53,11 @@ GREENHOUSE_TARGETS = [
         "board_token": "agilerobotsse",
         "company_name": "Agile Robots", # Handles EU Greenhouse hosted boards
     },
+]
+
+JOIN_TARGETS = [
+    {"company_slug": "pixel-robotics", "company_name": "Pixel Robotics"}, 
+    {"company_slug": "robominds", "company_name": "robominds GmbH"},
 ]
 
 
@@ -56,5 +77,8 @@ def get_scrapers():
     # Config-driven Greenhouse loop
     for target in GREENHOUSE_TARGETS:
         scrapers.append(GreenhouseScraper(**target))
+
+    for target in JOIN_TARGETS:
+        scrapers.append(JoinScraper(**target))
 
     return scrapers

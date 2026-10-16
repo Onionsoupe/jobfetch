@@ -150,7 +150,7 @@ class WorkdayJobScraper(BaseJobScraper):
         except Exception as e:
             print(f"Error saving {self.db_filename}: {e}")
 
-    def _cleanup_old_buffer(self, max_age_hours: int = 168):
+    def _cleanup_old_buffer(self, max_age_hours: int = 8736):
         now = datetime.now(timezone.utc)
         cutoff_time = now - timedelta(hours=max_age_hours)
         self.seen_jobs = {
@@ -272,7 +272,7 @@ class GreenhouseScraper(BaseJobScraper):
         except Exception as e:
             print(f"Error saving {self.db_filename}: {e}")
 
-    def _cleanup_old_buffer(self, max_age_hours: int = 168):
+    def _cleanup_old_buffer(self, max_age_hours: int = 8736):
         now = datetime.now(timezone.utc)
         cutoff_time = now - timedelta(hours=max_age_hours)
         self.seen_jobs = {
@@ -542,7 +542,7 @@ class AshbyScraper(BaseJobScraper):
         return new_jobs
 
 class PersonioScraper(BaseJobScraper):
-    """Scraper for companies using Personio ATS via their public XML feed."""
+    """Scraper for companies using Personio ATS via public XML feed or direct HTML fallback."""
     
     def __init__(self, tenant_slug: str, company_name: str, domain: str = "jobs.personio.de", db_filename: str = None):
         self.tenant_slug = tenant_slug
@@ -551,13 +551,14 @@ class PersonioScraper(BaseJobScraper):
         self.source_name = f"Personio ({company_name})"
         
         self.xml_url = f"https://{self.tenant_slug}.{self.domain}/xml"
+        self.html_url = f"https://{self.tenant_slug}.{self.domain}"
         self.base_job_url = f"https://{self.tenant_slug}.{self.domain}/job"
         
         self.db_filename = db_filename or f"seen_personio_{self.tenant_slug}_jobs.json"
         
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/xml, text/xml, */*"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         }
         
         self.seen_jobs = self._load_seen_jobs()
@@ -595,22 +596,177 @@ class PersonioScraper(BaseJobScraper):
         new_jobs = []
 
         try:
+            # Step 1: Try public XML endpoint first
             response = requests.get(self.xml_url, headers=self.headers, timeout=10)
-            if response.status_code != 200:
-                print(f"[{self.source_name}] API call failed with status: {response.status_code}")
+            
+            if response.status_code == 200:
+                root = ET.fromstring(response.content)
+                for position in root.findall(".//position"):
+                    job_id = position.findtext("id")
+                    title = position.findtext("name", "Untitled Role").strip()
+                    department = position.findtext("office", "General").strip()
+                    employment_type = position.findtext("employmentType", "Full-time").strip()
+                    
+                    full_link = f"{self.base_job_url}/{job_id}?language=en"
+
+                    if not job_id or full_link in self.seen_jobs:
+                        continue
+
+                    self.seen_jobs[full_link] = now
+
+                    new_jobs.append({
+                        "id": full_link,
+                        "title": title,
+                        "link": full_link,
+                        "source": self.source_name,
+                        "activity": "Active Posting",
+                        "summary": f"Dept: {department} | Type: {employment_type}"
+                    })
+            else:
+                # Step 2: Fallback to HTML parsing when XML returns 404
+                html_resp = requests.get(self.html_url, headers=self.headers, timeout=10)
+                if html_resp.status_code == 200:
+                    soup = BeautifulSoup(html_resp.text, "html.parser")
+                    # Personio renders links as <a href="/job/123456?language=en">
+                    job_links = soup.find_all("a", href=True)
+                    
+                    for a in job_links:
+                        href = a["href"]
+                        if "/job/" in href:
+                            full_link = href if href.startswith("http") else f"https://{self.tenant_slug}.{self.domain}{href}"
+                            title = a.get_text(strip=True) or "Untitled Role"
+                            
+                            if full_link in self.seen_jobs:
+                                continue
+
+                            self.seen_jobs[full_link] = now
+
+                            new_jobs.append({
+                                "id": full_link,
+                                "title": title,
+                                "link": full_link,
+                                "source": self.source_name,
+                                "activity": "Active Posting",
+                                "summary": f"<b>{title}</b>\n<a href=\"{full_link}\">View Position</a>"
+                            })
+
+        except Exception as e:
+            print(f"[{self.source_name}] Error fetching Personio jobs: {e}")
+
+        if new_jobs:
+            self._save_seen_jobs()
+
+        return new_jobs
+
+class JoinScraper(BaseJobScraper):
+    """Scraper for companies hosting job boards on JOIN (join.com)."""
+
+    def __init__(self, company_slug: str, company_name: str, db_filename: str = None):
+        self.company_slug = company_slug
+        self.company_name = company_name
+        self.source_name = f"JOIN ({company_name})"
+        
+        self.career_url = f"https://join.com/companies/{self.company_slug}"
+        # Direct REST API endpoint used by JOIN frontend widgets
+        self.api_url = f"https://join.com/api/v1/public/companies/{self.company_slug}/jobs"
+        self.db_filename = db_filename or f"seen_join_{self.company_slug}_jobs.json"
+
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/html, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": self.career_url,
+        }
+
+        self.seen_jobs = self._load_seen_jobs()
+
+    def _load_seen_jobs(self) -> dict:
+        if not os.path.exists(self.db_filename):
+            return {}
+        try:
+            with open(self.db_filename, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return {link: datetime.fromisoformat(ts) for link, ts in data.items()}
+        except Exception:
+            return {}
+
+    def _save_seen_jobs(self):
+        try:
+            data = {link: dt.isoformat() for link, dt in self.seen_jobs.items()}
+            with open(self.db_filename, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"Error saving {self.db_filename}: {e}")
+
+    def _cleanup_old_buffer(self, max_age_hours: int = 168):
+        now = datetime.now(timezone.utc)
+        cutoff_time = now - timedelta(hours=max_age_hours)
+        self.seen_jobs = {
+            link: seen_time
+            for link, seen_time in self.seen_jobs.items()
+            if seen_time > cutoff_time
+        }
+
+    def fetch_jobs(self) -> list[dict]:
+        now = datetime.now(timezone.utc)
+        self._cleanup_old_buffer(max_age_hours=168)
+        new_jobs = []
+
+        try:
+            # --- Strategy 1: JOIN Public REST API ---
+            response = requests.get(self.api_url, headers=self.headers, timeout=10)
+            job_postings = []
+
+            if response.status_code == 200:
+                data = response.json()
+                job_postings = data.get("jobs", data) if isinstance(data, (dict, list)) else []
+
+            # --- Strategy 2: HTML Scraping Fallback ---
+            if not job_postings:
+                html_resp = requests.get(self.career_url, headers=self.headers, timeout=10)
+                if html_resp.status_code == 200:
+                    soup = BeautifulSoup(html_resp.text, "html.parser")
+                    
+                    # Extract job links directly matching: /companies/{company_slug}/{job_id}
+                    job_anchors = soup.find_all("a", href=True)
+                    for a in job_anchors:
+                        href = a["href"]
+                        if f"/companies/{self.company_slug}/" in href and href != self.career_url:
+                            full_link = href if href.startswith("http") else f"https://join.com{href}"
+                            title = a.get_text(strip=True) or "Job Posting"
+
+                            if full_link in self.seen_jobs:
+                                continue
+
+                            self.seen_jobs[full_link] = now
+                            new_jobs.append({
+                                "id": full_link,
+                                "title": title,
+                                "link": full_link,
+                                "source": self.source_name,
+                                "activity": "Active Posting",
+                                "summary": f"<b>{title}</b>\n<a href=\"{full_link}\">View Position on JOIN</a>"
+                            })
+                    
+                    if new_jobs:
+                        self._save_seen_jobs()
+                    return new_jobs
+
+            if not job_postings:
+                print(f"[{self.source_name}] No jobs found or page structure updated.")
                 return []
 
-            root = ET.fromstring(response.content)
-            
-            for position in root.findall(".//position"):
-                job_id = position.findtext("id")
-                title = position.findtext("name", "Untitled Role").strip()
-                department = position.findtext("office", "General").strip()
-                employment_type = position.findtext("employmentType", "Full-time").strip()
+            for job in job_postings:
+                job_id = job.get("id") or job.get("publicId")
+                title = job.get("title", "Untitled Role").strip()
                 
-                full_link = f"{self.base_job_url}/{job_id}?language=en"
+                location = job.get("location", {})
+                loc_str = location.get("city") or location.get("name") if isinstance(location, dict) else str(location or "Unspecified")
 
-                if not job_id or full_link in self.seen_jobs:
+                job_slug = job.get("slug", "")
+                full_link = f"{self.career_url}/{job_id}-{job_slug}" if job_slug and job_id else f"{self.career_url}/{job_id}"
+
+                if full_link in self.seen_jobs:
                     continue
 
                 self.seen_jobs[full_link] = now
@@ -621,14 +777,13 @@ class PersonioScraper(BaseJobScraper):
                     "link": full_link,
                     "source": self.source_name,
                     "activity": "Active Posting",
-                    "summary": f"Dept: {department} | Type: {employment_type}"
+                    "summary": f"Location: {loc_str}"
                 })
 
         except Exception as e:
-            print(f"[{self.source_name}] Error fetching Personio jobs: {e}")
+            print(f"[{self.source_name}] Error fetching JOIN jobs: {e}")
 
         if new_jobs:
             self._save_seen_jobs()
 
         return new_jobs
-
